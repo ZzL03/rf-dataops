@@ -1,0 +1,111 @@
+name: rf-dataops
+
+x-backend: &backend
+  image: rf-dataops-backend:local
+  build:
+    context: .
+    dockerfile: docker/backend.Dockerfile
+  environment: &app-env
+    RF_DATABASE_HOST: db
+    RF_DATABASE_PORT: "5432"
+    RF_DATABASE_USER: ${POSTGRES_USER:-rf_dataops}
+    RF_DATABASE_PASSWORD: ${POSTGRES_PASSWORD:?Copy .env.example to .env and set a password}
+    RF_DATABASE_NAME: ${POSTGRES_DB:-rf_dataops}
+    RF_DATA_ROOT: /data
+    RF_DATA_ROOT_KEY: ${RF_DATA_ROOT_KEY:-default}
+    RF_MAX_SCAN_FILES: ${RF_MAX_SCAN_FILES:-1000}
+    RF_MAX_SEGMENTS_PER_CALL: ${RF_MAX_SEGMENTS_PER_CALL:-1000}
+    RF_LOG_LEVEL: ${RF_LOG_LEVEL:-INFO}
+    RF_ADMIN_TOKEN: ${RF_ADMIN_TOKEN:-}
+    RF_SESSION_MINUTES: ${RF_SESSION_MINUTES:-30}
+    RF_MODEL_ROOT: /models
+    RF_WORKER_LEASE_SECONDS: ${RF_WORKER_LEASE_SECONDS:-30}
+    RF_WORKER_HEARTBEAT_SECONDS: ${RF_WORKER_HEARTBEAT_SECONDS:-5}
+    RF_WORKER_RECOVERY_SECONDS: ${RF_WORKER_RECOVERY_SECONDS:-5}
+    RF_WORKER_POLL_SECONDS: ${RF_WORKER_POLL_SECONDS:-1}
+    RF_RETRY_BASE_SECONDS: ${RF_RETRY_BASE_SECONDS:-2}
+
+services:
+  db:
+    image: postgres:17-bookworm
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-rf_dataops}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Copy .env.example to .env and set a password}
+      POSTGRES_DB: ${POSTGRES_DB:-rf_dataops}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-55432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  migrate:
+    <<: *backend
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    <<: *backend
+    ports:
+      - "127.0.0.1:${API_PORT:-8000}:8000"
+    volumes:
+      - ./data:/data:ro
+      - ./models:/models:ro
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=10)"]
+      interval: 10s
+      timeout: 12s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  worker:
+    <<: *backend
+    command: ["python", "-m", "app.workers.runner"]
+    volumes:
+      - ./data:/data:ro
+      - ./models:/models:ro
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    stop_grace_period: 35s
+
+  frontend:
+    build:
+      context: ./frontend
+    ports:
+      - "127.0.0.1:${WEB_PORT:-18080}:8080"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8080/"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  tests:
+    <<: *backend
+    profiles: ["test"]
+    environment:
+      <<: *app-env
+      RF_TEST_DATABASE_NAME: rf_dataops_test
+    command: ["python", "-m", "pytest", "-q"]
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  postgres_data:

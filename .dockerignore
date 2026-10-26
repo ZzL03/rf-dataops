@@ -1,0 +1,15 @@
+.git
+.env
+.env.*
+.venv
+.tmp
+**/__pycache__
+**/.pytest_cache
+**/.ruff_cache
+**/*.egg-info
+sources
+data
+artifacts
+frontend
+docs
+tmp
